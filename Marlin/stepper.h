@@ -54,6 +54,8 @@ extern Stepper stepper;
 
 #define ENABLE_STEPPER_DRIVER_INTERRUPT()  SBI(TIMSK1, OCIE1A)
 #define DISABLE_STEPPER_DRIVER_INTERRUPT() CBI(TIMSK1, OCIE1A)
+#define STEPPER_ISR_ENABLED()             TEST(TIMSK1, OCIE1A)
+#define HAL_STEPPER_TIMER_RATE            ((F_CPU) * 0.125)
 
 // intRes = intIn1 * intIn2 >> 16
 // uses:
@@ -61,16 +63,16 @@ extern Stepper stepper;
 // r27 to store the byte 1 of the 24 bit result
 #define MultiU16X8toH16(intRes, charIn1, intIn2) \
   asm volatile ( \
-                 "clr r26 \n\t" \
-                 "mul %A1, %B2 \n\t" \
-                 "movw %A0, r0 \n\t" \
-                 "mul %A1, %A2 \n\t" \
-                 "add %A0, r1 \n\t" \
-                 "adc %B0, r26 \n\t" \
-                 "lsr r0 \n\t" \
-                 "adc %A0, r26 \n\t" \
-                 "adc %B0, r26 \n\t" \
-                 "clr r1 \n\t" \
+                 A("clr r26") \
+                 A("mul %A1, %B2") \
+                 A("movw %A0, r0") \
+                 A("mul %A1, %A2") \
+                 A("add %A0, r1") \
+                 A("adc %B0, r26") \
+                 A("lsr r0") \
+                 A("adc %A0, r26") \
+                 A("adc %B0, r26") \
+                 A("clr r1") \
                  : \
                  "=&r" (intRes) \
                  : \
@@ -118,38 +120,54 @@ class Stepper {
     #endif
 
     // Counter variables for the Bresenham line tracer
-    static long counter_X, counter_Y, counter_Z, counter_E;
+    static int32_t counter_X, counter_Y, counter_Z, counter_E;
     static volatile uint32_t step_events_completed; // The number of step events executed in the current block
+
+    #if ENABLED(BEZIER_JERK_CONTROL)
+      static int32_t bezier_A,     // A coefficient in Bézier speed curve
+                     bezier_B,     // B coefficient in Bézier speed curve
+                     bezier_C;     // C coefficient in Bézier speed curve
+      static uint32_t bezier_F,    // F coefficient in Bézier speed curve
+                      bezier_AV;   // AV coefficient in Bézier speed curve
+      static bool A_negative,      // If A coefficient was negative
+                  bezier_2nd_half; // If Bézier curve has been initialized or not
+    #endif
 
     #if ENABLED(LIN_ADVANCE)
 
-      static uint16_t nextMainISR, nextAdvanceISR, eISR_Rate;
+      static uint32_t LA_decelerate_after; // Copy from current executed block. Needed because current_block is set to NULL "too early".
+      static uint16_t nextMainISR, nextAdvanceISR, eISR_Rate, current_adv_steps,
+                      final_adv_steps, max_adv_steps; // Copy from current executed block. Needed because current_block is set to NULL "too early".
       #define _NEXT_ISR(T) nextMainISR = T
-      static volatile int e_steps[E_STEPPERS];
-      static int final_estep_rate;
-      static int current_estep_rate[E_STEPPERS]; // Actual extruder speed [steps/s]
-      static int current_adv_steps[E_STEPPERS];  // The amount of current added esteps due to advance.
-                                                 // i.e., the current amount of pressure applied
-                                                 // to the spring (=filament).
+      static int8_t e_steps;
+      static bool use_advance_lead;
+      #if E_STEPPERS > 1
+        static int8_t LA_active_extruder; // Copy from current executed block. Needed because current_block is set to NULL "too early".
+      #else
+        static constexpr int8_t LA_active_extruder = 0;
+      #endif
+
     #else // !LIN_ADVANCE
 
       #define _NEXT_ISR(T) OCR1A = T
 
     #endif // !LIN_ADVANCE
 
-    static long acceleration_time, deceleration_time;
+    static int32_t acceleration_time, deceleration_time;
     static uint8_t step_loops, step_loops_nominal;
 
-    static uint16_t OCR1A_nominal,
-                    acc_step_rate; // needed for deceleration start point
+    static uint16_t OCR1A_nominal;
+    #if DISABLED(BEZIER_JERK_CONTROL)
+      static uint16_t acc_step_rate; // needed for deceleration start point
+    #endif
 
-    static volatile long endstops_trigsteps[XYZ];
-    static volatile long endstops_stepsTotal, endstops_stepsDone;
+    static volatile int32_t endstops_trigsteps[XYZ];
+    static volatile int32_t endstops_stepsTotal, endstops_stepsDone;
 
     //
     // Positions of stepper motors, in step units
     //
-    static volatile long count_position[NUM_AXIS];
+    static volatile int32_t count_position[NUM_AXIS];
 
     //
     // Current direction of stepper motors (+1 or -1)
@@ -160,7 +178,7 @@ class Stepper {
     // Mixing extruder mix counters
     //
     #if ENABLED(MIXING_EXTRUDER)
-      static long counter_m[MIXING_STEPPERS];
+      static int32_t counter_m[MIXING_STEPPERS];
       #define MIXING_STEPPERS_LOOP(VAR) \
         for (uint8_t VAR = 0; VAR < MIXING_STEPPERS; VAR++) \
           if (current_block->mix_event_count[VAR])
@@ -197,9 +215,32 @@ class Stepper {
     //
     // Set the current position in steps
     //
-    static void set_position(const long &a, const long &b, const long &c, const long &e);
-    static void set_position(const AxisEnum &a, const long &v);
-    static void set_e_position(const long &e);
+    static void _set_position(const int32_t &a, const int32_t &b, const int32_t &c, const int32_t &e);
+
+    FORCE_INLINE static void _set_position(const AxisEnum a, const int32_t &v) { count_position[a] = v; }
+
+    FORCE_INLINE static void set_position(const int32_t &a, const int32_t &b, const int32_t &c, const int32_t &e) {
+      synchronize();
+      CRITICAL_SECTION_START;
+      _set_position(a, b, c, e);
+      CRITICAL_SECTION_END;
+    }
+
+    static void set_position(const AxisEnum a, const int32_t &v) {
+      synchronize();
+      CRITICAL_SECTION_START;
+      count_position[a] = v;
+      CRITICAL_SECTION_END;
+    }
+
+    FORCE_INLINE static void _set_e_position(const int32_t &e) { count_position[E_AXIS] = e; }
+
+    static void set_e_position(const int32_t &e) {
+      synchronize();
+      CRITICAL_SECTION_START;
+      count_position[E_AXIS] = e;
+      CRITICAL_SECTION_END;
+    }
 
     //
     // Set direction bits for all steppers
@@ -209,7 +250,7 @@ class Stepper {
     //
     // Get the position of a stepper, in steps
     //
-    static long position(const AxisEnum axis);
+    static int32_t position(const AxisEnum axis);
 
     //
     // Report the positions of the steppers, in steps
@@ -302,8 +343,8 @@ class Stepper {
 
   private:
 
-    FORCE_INLINE static unsigned short calc_timer_interval(unsigned short step_rate) {
-      unsigned short timer;
+    FORCE_INLINE static uint16_t calc_timer_interval(uint16_t step_rate) {
+      uint16_t timer;
 
       NOMORE(step_rate, MAX_STEP_FREQUENCY);
 
@@ -336,50 +377,16 @@ class Stepper {
       }
       if (timer < 100) { // (20kHz - this should never happen)
         timer = 100;
-        MYSERIAL.print(MSG_STEPPER_TOO_HIGH);
-        MYSERIAL.println(step_rate);
+        SERIAL_PROTOCOL(MSG_STEPPER_TOO_HIGH);
+        SERIAL_PROTOCOLLN(step_rate);
       }
       return timer;
     }
 
-    // Initialize the trapezoid generator from the current block.
-    // Called whenever a new block begins.
-    FORCE_INLINE static void trapezoid_generator_reset() {
-
-      static int8_t last_extruder = -1;
-
-      if (current_block->direction_bits != last_direction_bits || current_block->active_extruder != last_extruder) {
-        last_direction_bits = current_block->direction_bits;
-        last_extruder = current_block->active_extruder;
-        set_directions();
-      }
-
-      deceleration_time = 0;
-      // step_rate to timer interval
-      OCR1A_nominal = calc_timer_interval(current_block->nominal_rate);
-      // make a note of the number of step loops required at nominal speed
-      step_loops_nominal = step_loops;
-      acc_step_rate = current_block->initial_rate;
-      acceleration_time = calc_timer_interval(acc_step_rate);
-      _NEXT_ISR(acceleration_time);
-
-      #if ENABLED(LIN_ADVANCE)
-        if (current_block->use_advance_lead) {
-          current_estep_rate[current_block->active_extruder] = ((unsigned long)acc_step_rate * current_block->abs_adv_steps_multiplier8) >> 17;
-          final_estep_rate = (current_block->nominal_rate * current_block->abs_adv_steps_multiplier8) >> 17;
-        }
-      #endif
-
-      // SERIAL_ECHO_START();
-      // SERIAL_ECHOPGM("advance :");
-      // SERIAL_ECHO(current_block->advance/256.0);
-      // SERIAL_ECHOPGM("advance rate :");
-      // SERIAL_ECHO(current_block->advance_rate/256.0);
-      // SERIAL_ECHOPGM("initial advance :");
-      // SERIAL_ECHO(current_block->initial_advance/256.0);
-      // SERIAL_ECHOPGM("final advance :");
-      // SERIAL_ECHOLN(current_block->final_advance/256.0);
-    }
+    #if ENABLED(BEZIER_JERK_CONTROL)
+      static void _calc_bezier_curve_coeffs(const int32_t v0, const int32_t v1, const uint32_t av);
+      static int32_t _eval_bezier_curve(const uint32_t curr_step);
+    #endif
 
     #if HAS_DIGIPOTSS || HAS_MOTOR_CURRENT_PWM
       static void digipot_init();
