@@ -9174,7 +9174,7 @@ inline void gcode_M205() {
       const float junc_dev = parser.value_linear_units();
       if (WITHIN(junc_dev, 0.01, 0.3)) {
         planner.junction_deviation_mm = junc_dev;
-        planner.recalculate_max_e_jerk_factor();
+        planner.recalculate_max_e_jerk();
       }
       else {
         SERIAL_ERROR_START();
@@ -10882,7 +10882,7 @@ inline void gcode_M502() {
    */
   inline void gcode_M7219() {
     if (parser.seen('I'))
-      Max7219_init();
+      Max7219_Clear();
     else if (parser.seenval('R')) {
       const uint8_t r = parser.value_int();
       Max7219_Set_Row(r, parser.byteval('V'));
