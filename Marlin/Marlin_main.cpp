@@ -742,7 +742,6 @@ void set_current_from_steppers_for_axis(const AxisEnum axis);
   void plan_cubic_move(const float (&cart)[XYZE], const float (&offset)[4]);
 #endif
 
-void tool_change(const uint8_t tmp_extruder, const float fr_mm_s=0.0, bool no_move=false);
 void report_current_position();
 void report_current_position_detail();
 
@@ -4293,7 +4292,14 @@ void home_all_axes() { gcode_G28(true); }
 
   inline void _manual_goto_xy(const float &rx, const float &ry) {
 
-    #if MANUAL_PROBE_HEIGHT > 0
+    #ifdef MANUAL_PROBE_START_Z
+      #if MANUAL_PROBE_HEIGHT > 0
+        do_blocking_move_to(rx, ry, MANUAL_PROBE_HEIGHT);
+        do_blocking_move_to_z(MAX(0,MANUAL_PROBE_START_Z));
+      #else
+        do_blocking_move_to(rx, ry, MAX(0,MANUAL_PROBE_START_Z));
+      #endif
+    #elif MANUAL_PROBE_HEIGHT > 0
       const float prev_z = current_position[Z_AXIS];
       do_blocking_move_to(rx, ry, MANUAL_PROBE_HEIGHT);
       do_blocking_move_to_z(prev_z);
@@ -6882,11 +6888,9 @@ inline void gcode_M17() {
     if (retract && thermalManager.hotEnoughToExtrude(active_extruder))
       do_pause_e_move(retract, PAUSE_PARK_RETRACT_FEEDRATE);
 
-    #if ENABLED(NO_MOTION_BEFORE_HOMING)
-      if (!axis_unhomed_error())
-    #endif
-        // Park the nozzle by moving up by z_lift and then moving to (x_pos, y_pos)
-        Nozzle::park(2, park_point);
+    // Park the nozzle by moving up by z_lift and then moving to (x_pos, y_pos)
+    if (!axis_unhomed_error())
+      Nozzle::park(2, park_point);
 
     // Unload the filament
     if (unload_length)
@@ -11983,6 +11987,8 @@ inline void invalid_extruder_error(const uint8_t e) {
  * previous tool out of the way and the new tool into place.
  */
 void tool_change(const uint8_t tmp_extruder, const float fr_mm_s/*=0.0*/, bool no_move/*=false*/) {
+  planner.synchronize();
+
   #if ENABLED(MIXING_EXTRUDER) && MIXING_VIRTUAL_TOOLS > 1
 
     mixing_tool_change(tmp_extruder);
