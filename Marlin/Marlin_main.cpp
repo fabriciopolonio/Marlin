@@ -2294,7 +2294,7 @@ void clean_up_after_endstop_or_probe_move() {
       #endif
 
       // move up to make clearance for the probe
-      do_blocking_move_to_z(current_position[Z_AXIS] + Z_CLEARANCE_BETWEEN_PROBES, MMM_TO_MMS(Z_PROBE_SPEED_FAST));
+      do_blocking_move_to_z(current_position[Z_AXIS] + Z_CLEARANCE_MULTI_PROBE, MMM_TO_MMS(Z_PROBE_SPEED_FAST));
 
     #else
 
@@ -2328,7 +2328,7 @@ void clean_up_after_endstop_or_probe_move() {
 
     #if MULTIPLE_PROBING > 2
         probes_total += current_position[Z_AXIS];
-        if (p > 1) do_blocking_move_to_z(current_position[Z_AXIS] + Z_CLEARANCE_BETWEEN_PROBES, MMM_TO_MMS(Z_PROBE_SPEED_FAST));
+        if (p > 1) do_blocking_move_to_z(current_position[Z_AXIS] + Z_CLEARANCE_MULTI_PROBE, MMM_TO_MMS(Z_PROBE_SPEED_FAST));
       }
     #endif
 
@@ -3132,28 +3132,34 @@ static void homeaxis(const AxisEnum axis) {
     #if ENABLED(X_DUAL_ENDSTOPS)
       if (axis == X_AXIS) {
         const float adj = ABS(endstops.x_endstop_adj);
-        if (pos_dir ? (endstops.x_endstop_adj > 0) : (endstops.x_endstop_adj < 0)) stepper.set_x_lock(true); else stepper.set_x2_lock(true);
-        do_homing_move(axis, pos_dir ? -adj : adj);
-        stepper.set_x_lock(false);
-        stepper.set_x2_lock(false);
+        if (adj) {
+          if (pos_dir ? (endstops.x_endstop_adj > 0) : (endstops.x_endstop_adj < 0)) stepper.set_x_lock(true); else stepper.set_x2_lock(true);
+          do_homing_move(axis, pos_dir ? -adj : adj);
+          stepper.set_x_lock(false);
+          stepper.set_x2_lock(false);
+        }
       }
     #endif
     #if ENABLED(Y_DUAL_ENDSTOPS)
       if (axis == Y_AXIS) {
         const float adj = ABS(endstops.y_endstop_adj);
-        if (pos_dir ? (endstops.y_endstop_adj > 0) : (endstops.y_endstop_adj < 0)) stepper.set_y_lock(true); else stepper.set_y2_lock(true);
-        do_homing_move(axis, pos_dir ? -adj : adj);
-        stepper.set_y_lock(false);
-        stepper.set_y2_lock(false);
+        if (adj) {
+          if (pos_dir ? (endstops.y_endstop_adj > 0) : (endstops.y_endstop_adj < 0)) stepper.set_y_lock(true); else stepper.set_y2_lock(true);
+          do_homing_move(axis, pos_dir ? -adj : adj);
+          stepper.set_y_lock(false);
+          stepper.set_y2_lock(false);
+        }
       }
     #endif
     #if ENABLED(Z_DUAL_ENDSTOPS)
       if (axis == Z_AXIS) {
         const float adj = ABS(endstops.z_endstop_adj);
-        if (pos_dir ? (endstops.z_endstop_adj > 0) : (endstops.z_endstop_adj < 0)) stepper.set_z_lock(true); else stepper.set_z2_lock(true);
-        do_homing_move(axis, pos_dir ? -adj : adj);
-        stepper.set_z_lock(false);
-        stepper.set_z2_lock(false);
+        if (adj) {
+          if (pos_dir ? (endstops.z_endstop_adj > 0) : (endstops.z_endstop_adj < 0)) stepper.set_z_lock(true); else stepper.set_z2_lock(true);
+          do_homing_move(axis, pos_dir ? -adj : adj);
+          stepper.set_z_lock(false);
+          stepper.set_z2_lock(false);
+        }
       }
     #endif
     stepper.set_homing_dual_axis(false);
@@ -10882,30 +10888,52 @@ inline void gcode_M502() {
    * M7219: Control the Max7219 LED matrix
    * 
    *  I         - Initialize (clear) the matrix
+   *  F         - Fill the matrix (set all bits)
+   *  P         - Dump the LEDs[] array values
    *  C<column> - Set a column to the 8-bit value V
    *  R<row>    - Set a row to the 8-bit value V
    *  X<pos>    - X position of an LED to set or toggle
    *  Y<pos>    - Y position of an LED to set or toggle
-   *  V<value>  - The 8-bit value or on/off state to set
+   *  V<value>  - The potentially 32-bit value or on/off state to set
+   *              (for example: a chain of 4 Max7219 devices can have 32 bit 
+   *               rows or columns depending upon rotation)
    */
   inline void gcode_M7219() {
     if (parser.seen('I'))
       Max7219_Clear();
-    else if (parser.seenval('R')) {
-      const uint8_t r = parser.value_int();
-      Max7219_Set_Row(r, parser.byteval('V'));
+
+    if (parser.seen('F'))
+      for(uint8_t x = 0; x < MAX7219_X_LEDS; x++)
+        Max7219_Set_Column(x, 0xffffffff);
+
+    if (parser.seenval('R')) {
+      const uint32_t r = parser.value_int();
+      Max7219_Set_Row(r, parser.ulongval('V'));
+      return;
     }
     else if (parser.seenval('C')) {
-      const uint8_t c = parser.value_int();
-      Max7219_Set_Column(c, parser.byteval('V'));
+      const uint32_t c = parser.value_int();
+      Max7219_Set_Column(c, parser.ulongval('V'));
+      return;
     }
-    else if (parser.seenval('X') || parser.seenval('Y')) {
+
+    if (parser.seenval('X') || parser.seenval('Y')) {
       const uint8_t x = parser.byteval('X'), y = parser.byteval('Y');
       if (parser.seenval('V'))
         Max7219_LED_Set(x, y, parser.boolval('V'));
       else
         Max7219_LED_Toggle(x, y);
     }
+
+    if (parser.seen('P')) {
+      for(uint8_t x = 0; x < (8*MAX7219_NUMBER_UNITS); x++) {
+        SERIAL_ECHOPAIR("LEDs[", x);
+        SERIAL_ECHOPAIR("]=", LEDs[x]);
+        SERIAL_ECHO("\n");
+      }
+      return;
+    }
+
   }
 #endif // MAX7219_GCODE
 
@@ -10957,26 +10985,26 @@ inline void gcode_M502() {
       switch (i) {
         case X_AXIS:
           #if X_IS_TRINAMIC
-            if (index == 0) TMC_SET_CURRENT(X);
+            if (index < 2) TMC_SET_CURRENT(X);
           #endif
           #if X2_IS_TRINAMIC
-            if (index == 1) TMC_SET_CURRENT(X2);
+            if (!(index & 1)) TMC_SET_CURRENT(X2);
           #endif
           break;
         case Y_AXIS:
           #if Y_IS_TRINAMIC
-            if (index == 0) TMC_SET_CURRENT(Y);
+            if (index < 2) TMC_SET_CURRENT(Y);
           #endif
           #if Y2_IS_TRINAMIC
-            if (index == 1) TMC_SET_CURRENT(Y2);
+            if (!(index & 1)) TMC_SET_CURRENT(Y2);
           #endif
           break;
         case Z_AXIS:
           #if Z_IS_TRINAMIC
-            if (index == 0) TMC_SET_CURRENT(Z);
+            if (index < 2) TMC_SET_CURRENT(Z);
           #endif
           #if Z2_IS_TRINAMIC
-            if (index == 1) TMC_SET_CURRENT(Z2);
+            if (!(index & 1)) TMC_SET_CURRENT(Z2);
           #endif
           break;
         case E_AXIS: {
@@ -11002,48 +11030,40 @@ inline void gcode_M502() {
       }
     }
 
-    if (report) LOOP_XYZE(i) switch (i) {
-      case X_AXIS:
-        #if X_IS_TRINAMIC
-          TMC_SAY_CURRENT(X);
-        #endif
-        #if X2_IS_TRINAMIC
-          TMC_SAY_CURRENT(X2);
-        #endif
-        break;
-      case Y_AXIS:
-        #if Y_IS_TRINAMIC
-          TMC_SAY_CURRENT(Y);
-        #endif
-        #if Y2_IS_TRINAMIC
-          TMC_SAY_CURRENT(Y2);
-        #endif
-        break;
-      case Z_AXIS:
-        #if Z_IS_TRINAMIC
-          TMC_SAY_CURRENT(Z);
-        #endif
-        #if Z2_IS_TRINAMIC
-          TMC_SAY_CURRENT(Z2);
-        #endif
-        break;
-      case E_AXIS:
-        #if E0_IS_TRINAMIC
-          TMC_SAY_CURRENT(E0);
-        #endif
-        #if E1_IS_TRINAMIC
-          TMC_SAY_CURRENT(E1);
-        #endif
-        #if E2_IS_TRINAMIC
-          TMC_SAY_CURRENT(E2);
-        #endif
-        #if E3_IS_TRINAMIC
-          TMC_SAY_CURRENT(E3);
-        #endif
-        #if E4_IS_TRINAMIC
-          TMC_SAY_CURRENT(E4);
-        #endif
-        break;
+    if (report) {
+      #if X_IS_TRINAMIC
+        TMC_SAY_CURRENT(X);
+      #endif
+      #if X2_IS_TRINAMIC
+        TMC_SAY_CURRENT(X2);
+      #endif
+      #if Y_IS_TRINAMIC
+        TMC_SAY_CURRENT(Y);
+      #endif
+      #if Y2_IS_TRINAMIC
+        TMC_SAY_CURRENT(Y2);
+      #endif
+      #if Z_IS_TRINAMIC
+        TMC_SAY_CURRENT(Z);
+      #endif
+      #if Z2_IS_TRINAMIC
+        TMC_SAY_CURRENT(Z2);
+      #endif
+      #if E0_IS_TRINAMIC
+        TMC_SAY_CURRENT(E0);
+      #endif
+      #if E1_IS_TRINAMIC
+        TMC_SAY_CURRENT(E1);
+      #endif
+      #if E2_IS_TRINAMIC
+        TMC_SAY_CURRENT(E2);
+      #endif
+      #if E3_IS_TRINAMIC
+        TMC_SAY_CURRENT(E3);
+      #endif
+      #if E4_IS_TRINAMIC
+        TMC_SAY_CURRENT(E4);
+      #endif
     }
   }
 
@@ -11180,26 +11200,26 @@ inline void gcode_M502() {
         switch (i) {
           case X_AXIS:
             #if X_IS_TRINAMIC
-              if (index == 0) TMC_SET_PWMTHRS(X,X);
+              if (index < 2) TMC_SET_PWMTHRS(X,X);
             #endif
             #if X2_IS_TRINAMIC
-              if (index == 1) TMC_SET_PWMTHRS(X,X2);
+              if (!(index & 1)) TMC_SET_PWMTHRS(X,X2);
             #endif
             break;
           case Y_AXIS:
             #if Y_IS_TRINAMIC
-              if (index == 0) TMC_SET_PWMTHRS(Y,Y);
+              if (index < 2) TMC_SET_PWMTHRS(Y,Y);
             #endif
             #if Y2_IS_TRINAMIC
-              if (index == 1) TMC_SET_PWMTHRS(Y,Y2);
+              if (!(index & 1)) TMC_SET_PWMTHRS(Y,Y2);
             #endif
             break;
           case Z_AXIS:
             #if Z_IS_TRINAMIC
-              if (index == 0) TMC_SET_PWMTHRS(Z,Z);
+              if (index < 2) TMC_SET_PWMTHRS(Z,Z);
             #endif
             #if Z2_IS_TRINAMIC
-              if (index == 1) TMC_SET_PWMTHRS(Z,Z2);
+              if (!(index & 1)) TMC_SET_PWMTHRS(Z,Z2);
             #endif
             break;
           case E_AXIS: {
@@ -11225,48 +11245,40 @@ inline void gcode_M502() {
         }
       }
 
-      if (report) LOOP_XYZE(i) switch (i) {
-        case X_AXIS:
-          #if X_IS_TRINAMIC
-            TMC_SAY_PWMTHRS(X,X);
-          #endif
-          #if X2_IS_TRINAMIC
-            TMC_SAY_PWMTHRS(X,X2);
-          #endif
-          break;
-        case Y_AXIS:
-          #if Y_IS_TRINAMIC
-            TMC_SAY_PWMTHRS(Y,Y);
-          #endif
-          #if Y2_IS_TRINAMIC
-            TMC_SAY_PWMTHRS(Y,Y2);
-          #endif
-          break;
-        case Z_AXIS:
-          #if Z_IS_TRINAMIC
-            TMC_SAY_PWMTHRS(Z,Z);
-          #endif
-          #if Z2_IS_TRINAMIC
-            TMC_SAY_PWMTHRS(Z,Z2);
-          #endif
-          break;
-        case E_AXIS:
-          #if E0_IS_TRINAMIC
-            TMC_SAY_PWMTHRS_E(0);
-          #endif
-          #if E_STEPPERS > 1 && E1_IS_TRINAMIC
-            TMC_SAY_PWMTHRS_E(1);
-          #endif
-          #if E_STEPPERS > 2 && E2_IS_TRINAMIC
-            TMC_SAY_PWMTHRS_E(2);
-          #endif
-          #if E_STEPPERS > 3 && E3_IS_TRINAMIC
-            TMC_SAY_PWMTHRS_E(3);
-          #endif
-          #if E_STEPPERS > 4 && E4_IS_TRINAMIC
-            TMC_SAY_PWMTHRS_E(4);
-          #endif
-          break;
+      if (report) {
+        #if X_IS_TRINAMIC
+          TMC_SAY_PWMTHRS(X,X);
+        #endif
+        #if X2_IS_TRINAMIC
+          TMC_SAY_PWMTHRS(X,X2);
+        #endif
+        #if Y_IS_TRINAMIC
+          TMC_SAY_PWMTHRS(Y,Y);
+        #endif
+        #if Y2_IS_TRINAMIC
+          TMC_SAY_PWMTHRS(Y,Y2);
+        #endif
+        #if Z_IS_TRINAMIC
+          TMC_SAY_PWMTHRS(Z,Z);
+        #endif
+        #if Z2_IS_TRINAMIC
+          TMC_SAY_PWMTHRS(Z,Z2);
+        #endif
+        #if E0_IS_TRINAMIC
+          TMC_SAY_PWMTHRS_E(0);
+        #endif
+        #if E_STEPPERS > 1 && E1_IS_TRINAMIC
+          TMC_SAY_PWMTHRS_E(1);
+        #endif
+        #if E_STEPPERS > 2 && E2_IS_TRINAMIC
+          TMC_SAY_PWMTHRS_E(2);
+        #endif
+        #if E_STEPPERS > 3 && E3_IS_TRINAMIC
+          TMC_SAY_PWMTHRS_E(3);
+        #endif
+        #if E_STEPPERS > 4 && E4_IS_TRINAMIC
+          TMC_SAY_PWMTHRS_E(4);
+        #endif
       }
     }
   #endif // HYBRID_THRESHOLD
@@ -11288,66 +11300,60 @@ inline void gcode_M502() {
           #if X_SENSORLESS
             case X_AXIS:
               #if ENABLED(X_IS_TMC2130) || ENABLED(IS_TRAMS)
-                if (index == 0) TMC_SET_SGT(X);
+                if (index < 2) TMC_SET_SGT(X);
               #endif
               #if ENABLED(X2_IS_TMC2130)
-                if (index == 1) TMC_SET_SGT(X2);
+                if (!(index & 1)) TMC_SET_SGT(X2);
               #endif
               break;
           #endif
           #if Y_SENSORLESS
             case Y_AXIS:
               #if ENABLED(Y_IS_TMC2130) || ENABLED(IS_TRAMS)
-                if (index == 0) TMC_SET_SGT(Y);
+                if (index < 2) TMC_SET_SGT(Y);
               #endif
               #if ENABLED(Y2_IS_TMC2130)
-                if (index == 1) TMC_SET_SGT(Y2);
+                if (!(index & 1)) TMC_SET_SGT(Y2);
               #endif
               break;
           #endif
           #if Z_SENSORLESS
             case Z_AXIS:
               #if ENABLED(Z_IS_TMC2130) || ENABLED(IS_TRAMS)
-                if (index == 0) TMC_SET_SGT(Z);
+                if (index < 2) TMC_SET_SGT(Z);
               #endif
               #if ENABLED(Z2_IS_TMC2130)
-                if (index == 1) TMC_SET_SGT(Z2);
+                if (!(index & 1)) TMC_SET_SGT(Z2);
               #endif
               break;
           #endif
         }
       }
 
-      if (report) LOOP_XYZ(i) switch (i) {
+      if (report) {
         #if X_SENSORLESS
-          case X_AXIS:
-            #if ENABLED(X_IS_TMC2130) || ENABLED(IS_TRAMS)
-              TMC_SAY_SGT(X);
-            #endif
-            #if ENABLED(X2_IS_TMC2130)
-              TMC_SAY_SGT(X2);
-            #endif
-            break;
+          #if ENABLED(X_IS_TMC2130) || ENABLED(IS_TRAMS)
+            TMC_SAY_SGT(X);
+          #endif
+          #if ENABLED(X2_IS_TMC2130)
+            TMC_SAY_SGT(X2);
+          #endif
         #endif
         #if Y_SENSORLESS
-          case Y_AXIS:
-            #if ENABLED(Y_IS_TMC2130) || ENABLED(IS_TRAMS)
-              TMC_SAY_SGT(Y);
-            #endif
-            #if ENABLED(Y2_IS_TMC2130)
-              TMC_SAY_SGT(Y2);
-            #endif
-            break;
+          #if ENABLED(Y_IS_TMC2130) || ENABLED(IS_TRAMS)
+            TMC_SAY_SGT(Y);
+          #endif
+          #if ENABLED(Y2_IS_TMC2130)
+            TMC_SAY_SGT(Y2);
+          #endif
         #endif
         #if Z_SENSORLESS
-          case Z_AXIS:
-            #if ENABLED(Z_IS_TMC2130) || ENABLED(IS_TRAMS)
-              TMC_SAY_SGT(Z);
-            #endif
-            #if ENABLED(Z2_IS_TMC2130)
-              TMC_SAY_SGT(Z2);
-            #endif
-            break;
+          #if ENABLED(Z_IS_TMC2130) || ENABLED(IS_TRAMS)
+            TMC_SAY_SGT(Z);
+          #endif
+          #if ENABLED(Z2_IS_TMC2130)
+            TMC_SAY_SGT(Z2);
+          #endif
         #endif
       }
     }
@@ -14735,6 +14741,6 @@ void loop() {
       if (++cmd_queue_index_r >= BUFSIZE) cmd_queue_index_r = 0;
     }
   }
-  endstops.report_state();
+  endstops.event_handler();
   idle();
 }
